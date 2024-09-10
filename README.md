@@ -7,7 +7,7 @@ Constantly monitor a log file and watch out for specific keywords, if any appear
 #### Installation:
 - Copy a header template, logwatcher.hpp_xxx, as logwatcher.hpp, then edit it as you see fit
 - Compile using, for example, g++ -Os -o logwatcher ./logwatcher.cpp -lstdc++
-- Only give r permission, i.e., chmod 711 logwatcher
+- Only give x permission, i.e., chmod 711 logwatcher
 
 #### Usage: 
 (Slurm version)
@@ -100,7 +100,7 @@ logwatcher -e "./run_surface_model 2024-01-01" \
 logwatcher --stay -e "pdsh -w ${SLURM_NODELIST} nvidia-smi | dshbak >& jobmon-${SLURM_JOBID}.gpu" \
            --all --missing --check-at-start -n 300
 logwatcher --stay -e "pdsh -w ${SLURM_NODELIST} top -b -n1 -i | dshbak >& jobmon-${SLURM_JOBID}.cpu" \
-           --all --missing --check-at-start -n 300
+           --missing -c "PAUSE_HW_MONITORING" --check-at-start -n 300
 # Note:
 # 1) -n <second> should NOT be too small, so that it won't steal too much CPU time from your main workload, affecting performance.
 # 2) It may be more convenient to create and use a wrapper script containing nvidia-smi, top and/or other commands.
