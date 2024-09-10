@@ -1,0 +1,207 @@
+/******************************************************************
+*
+*  logwatcher
+*
+*  Constantly monitor a log file and watch out for specific keywords,
+*  if any appears, then execute the assigned command.
+*
+*  Copyright (c) 2024, Somrath Kanoksirirath.
+*  All rights reserved under BSD 3-clause license.
+*
+*  ln -s ./logwatcher.hpp_slurm logwatcher.hpp
+*  g++ -Os -o logwatcher ./logwatcher.cpp -lstdc++ -lslurm
+*  chmod 711 logwatcher
+*
+******************************************************************/
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>      // getpid, getppid and fork -- LINUX host
+#include <limits.h>      // PATH_MAX
+#include <slurm/slurm.h> // SLURM API
+
+const std::string version_string = "LOGWATCHER version 1.1.0 (for Slurm jobs)" ;
+
+constexpr long long int DEFAULT_INTERVAL_SECOND = 600 ;
+constexpr long long int MIN_INTERVAL_SECOND = 60 ;
+constexpr long long int MAX_INTERVAL_SECOND = 1*60*60 ;
+long long int MAX_TIMEOUT_SECOND  = 5*24*60*60 ;
+
+std::string DEFAULT_FILEPATH ;
+std::string DEFAULT_COMMAND  ;
+const std::vector<std::string> DEFAULT_KEYWORDS = {"CUDA out of memory","srun: error:","oom-kill event"};
+
+constexpr bool CHECK_PPID       = true ;  // Terminate with parent process
+std::string FALSE_START_MESSAGE = " "  ;  // Displayed when set_defaults_and_startup_cond() return false;
+
+// --- --- ---
+
+// logwatcher functions used in set_defaults_and_startup_cond()
+std::string executable_name ;
+inline std::string system_exec(const char* cmd);
+
+
+constexpr int   DEFAULT_NUM_MONITOR_PER_MACHINE = 8 ;  // Better use allocated CPU on node, but there is a bug in Slurm API (T.T)
+constexpr int OVERLIMIT_NUM_MONITOR_PER_MACHINE = 4 ;  // If exceed more than this --> execute 'scancel --signal=KILL xxx' to prevent drain/down/...
+const std::string slurm_conf = "/etc/slurm/slurm.conf" ;
+const std::vector<std::string> forbid_hostname = {"frontend-1","frontend-2","admin"};
+
+
+inline bool set_defaults_and_startup_cond()
+{
+    // Check if is on forbid hosts
+    char hostname[256];
+    if( gethostname(hostname, sizeof(hostname)) != 0 ){
+        FALSE_START_MESSAGE = "Cannot get hostname -- Is this a Linux host?" ;
+        return false;
+    }
+    bool permithost = true ;
+    for(unsigned int i=0 ; i<forbid_hostname.size() ; ++i)
+    {
+        if( forbid_hostname[i].compare(hostname) == 0 )
+        {
+            permithost = false ;
+            FALSE_START_MESSAGE = "Administratively prohibited to run on " + forbid_hostname[i] + "." ;
+            break;
+        }
+    }
+    if( !permithost ){ return false; }
+
+    // --- --- ---
+
+    FALSE_START_MESSAGE = "Must be used inside a SLURM job script." ;
+
+    // Slurm API init
+    slurm_init(slurm_conf.c_str());
+
+    // Get unique job id
+    pid_t pid = getpid();
+    unsigned int unique_jobid ;
+    if( slurm_pid2jobid(pid, &unique_jobid) != SLURM_SUCCESS ){
+        slurm_fini();
+        return false;
+    }else{
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay --> Gentle to Slurm node
+    }
+
+    // Get remaining time
+    MAX_TIMEOUT_SECOND = slurm_get_rem_time(unique_jobid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay --> Gentle to Slurm node
+
+    // Get job info
+    job_info_msg_t *job_resp ;
+    if( slurm_load_job(&job_resp, unique_jobid, SHOW_ALL) != SLURM_SUCCESS ){
+        slurm_fini();
+        return false;
+    }else{
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay --> Gentle to Slurm node
+    }
+
+    int max_monitor ;
+    for(unsigned int i=0 ; i<job_resp->record_count ; ++i)
+    {
+        slurm_job_info_t *job_ptr = job_resp->job_array + i ;
+        if( job_ptr->job_id == unique_jobid )
+        {
+            // Get StdErr
+            char buf[PATH_MAX];
+            slurm_get_job_stderr(buf, sizeof(buf), job_ptr);
+            DEFAULT_FILEPATH = buf ;
+
+            // Get general job id
+            if( job_ptr->array_job_id != 0 ){
+                DEFAULT_COMMAND = std::to_string(job_ptr->array_job_id);
+                DEFAULT_COMMAND += '_' ;
+                DEFAULT_COMMAND += std::to_string(job_ptr->array_task_id);
+            }else{
+                DEFAULT_COMMAND = std::to_string(job_ptr->job_id);
+            }
+
+            // Get allocated CPUs on node --> better max_monitor
+            // *** But there is a bug in this API !! ***
+            // (https://github.com/SchedMD/slurm/commit/9b2184b31e1c1d98ab722ee994644c89ea671859)
+            //int nodeid = std::stoi(std::getenv("SLURM_NODEID"));
+            //std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Delay = be gentle towards Slurm server
+            //max_monitor = slurm_job_cpus_allocated_on_node_id(job_ptr->job_resrcs, nodeid);
+            //max_monitor = slurm_job_cpus_allocated_on_node(job_ptr->job_resrcs, hostname);
+            // For now,
+            max_monitor = DEFAULT_NUM_MONITOR_PER_MACHINE ;
+
+            break;
+        }
+    }
+    slurm_free_job_info_msg(job_resp);
+
+    // --- --- ---
+
+    FALSE_START_MESSAGE = "Only " + std::to_string(max_monitor) + " " + executable_name ;
+    FALSE_START_MESSAGE += " are allowed in this job node (" + std::to_string(unique_jobid) + " on " + hostname + "). Terminate." ;
+
+    std::string check_command = "pgrep -u $(whoami) " + executable_name + " | tr '\n' ','" ;
+    std::string output = system_exec(check_command.c_str());
+
+    unsigned int temp_jobid ;
+    for(int end = output.find(',') ; end != std::string::npos ; end = output.find(','))
+    {
+        pid = std::stoi(output.substr(0, end));
+        if( slurm_pid2jobid(pid, &temp_jobid) == SLURM_SUCCESS ){
+            if( temp_jobid == unique_jobid ){
+                max_monitor -= 1 ;
+            }
+        }
+        output.erase(output.begin(), output.begin() + end+1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Small delay --> Gentle to Slurm node
+    }
+
+    slurm_fini();
+    if( max_monitor < - OVERLIMIT_NUM_MONITOR_PER_MACHINE ){
+        std::string temp = "scancel --signal=KILL " + DEFAULT_COMMAND ;
+        system_exec(temp.c_str());
+    }
+    DEFAULT_COMMAND = "scancel " + DEFAULT_COMMAND ;
+    if( max_monitor < 0 ){ return false; }
+
+return true; }
+
+
+inline void print_usage(const std::string &exec_name)
+{
+    std::cout
+    << "Usage: " << exec_name << " [OPTIONS]...\n"
+    << "Constantly monitor the SLURM StdErr log file and watch out for\n"
+    << " 1. CUDA out of memory \n"
+    << " 2. srun: error:       \n"
+    << " 3. oom-kill event     \n"
+    << "if any appears, then execute scancel to kill the job.\n"
+    << "\n"
+    << "Note: 1) Must NOT run on frontend/login nodes\n"
+    << "      2) Must run inside a SLURM job\n"
+    << "      3) At most " << std::to_string(DEFAULT_NUM_MONITOR_PER_MACHINE) << " " << exec_name << " are allowed per job node\n"
+    << "\n"
+    << "OPTIONS:\n"
+    << "      --all                  execute when all instead of any\n"
+    << "  -c, --catch <keyword>      keyword/text to be caught (accept several --catch)\n"
+    << "      --check-at-start       immediately check after successfully start\n"
+    << "      --check-once           check only once then terminate\n"
+    << "  -e, --execute <command>    command to get executed\n"
+    << "  -f, --logfile <filepath>   path to the log file\n"
+    << "      --foreground           run in foreground\n"
+    << "      --missing              execute when missing instead of found\n"
+    << "  -n, --interval <second>    checking interval in second [>" << MIN_INTERVAL_SECOND << ",<" << MAX_INTERVAL_SECOND << "]\n"
+    << "  -t, --timeout <minute>     timeout duration in minute [<" << int(MAX_TIMEOUT_SECOND/60) << "]\n"
+    << "      --stay                 stay alive until timeout\n"
+    << "  -v, --verbose              verbose output\n"
+    << "  -V, --version              print version\n"
+    << "  -h, --help                 print this usage\n"
+    << std::endl;
+
+return; }
+
+
+// logwatcher functions not used in set_defaults_and_startup_cond()
+inline bool file_exists(const std::string &filename);
+inline std::string get_timestamp();
+

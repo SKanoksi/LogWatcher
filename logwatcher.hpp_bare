@@ -1,0 +1,76 @@
+/******************************************************************
+*
+*  logwatcher
+*
+*  Constantly monitor a log file and watch out for specific keywords,
+*  if any appears, then execute the assigned command.
+*
+*  Copyright (c) 2024, Somrath Kanoksirirath.
+*  All rights reserved under BSD 3-clause license.
+*
+*  ln -s ./logwatcher.hpp_bare logwatcher.hpp
+*  g++ -Os -o logwatcher ./logwatcher.cpp -lstdc++
+*  chmod 711 logwatcher
+*
+******************************************************************/
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <cstdlib>
+
+const std::string version_string = "LOGWATCHER version 1.1.0 (Bare)" ;
+
+constexpr long long int DEFAULT_INTERVAL_SECOND = 600 ;
+constexpr long long int MIN_INTERVAL_SECOND = 60 ;
+constexpr long long int MAX_INTERVAL_SECOND = 1*60*60 ;
+constexpr long long int MAX_TIMEOUT_SECOND  = 365*24*60*60 ; // 1 year
+
+std::string DEFAULT_FILEPATH ;
+std::string DEFAULT_COMMAND  ;
+std::vector<std::string> DEFAULT_KEYWORDS ;
+
+constexpr bool CHECK_PPID       = true ; // Terminate with parent process
+std::string FALSE_START_MESSAGE = " "  ; // Displayed when set_defaults_and_startup_cond() return false;
+
+// --- --- ---
+
+inline bool set_defaults_and_startup_cond()
+{
+
+return true; }
+
+
+inline void print_usage(const std::string &executable_name)
+{
+    std::cout
+    << "Usage: " << executable_name << " [OPTIONS]...\n"
+    << "Constantly monitor a file and watch out for specific keywords,\n"
+    << "if any appears, then execute the assigned command.\n"
+    << "\n"
+    << "OPTIONS:\n"
+    << "      --all                  execute when all instead of any\n"
+    << "  -c, --catch <keyword>      keyword/text to be caught (accept several --catch)\n"
+    << "      --check-at-start       immediately check after successfully start\n"
+    << "      --check-once           check only once then terminate\n"
+    << "  -e, --execute <command>    command to get executed\n"
+    << "  -f, --logfile <filepath>   path to the log file\n"
+    << "      --foreground           run in foreground\n"
+    << "      --missing              execute when missing instead of found\n"
+    << "  -n, --interval <second>    checking interval in second [>" << MIN_INTERVAL_SECOND << ",<" << MAX_INTERVAL_SECOND << "]\n"
+    << "  -t, --timeout <minute>     timeout duration in minute [<" << int(MAX_TIMEOUT_SECOND/60) << "]\n"
+    << "      --stay                 stay alive until timeout\n"
+    << "  -v, --verbose              verbose output\n"
+    << "  -V, --version              print version\n"
+    << "  -h, --help                 print this usage\n"
+    << std::endl;
+
+return; }
+
+
+// logwatcher functions not used in set_defaults_and_startup_cond()
+std::string executable_name ;
+inline bool file_exists(const std::string &filename);
+inline std::string get_timestamp();
+inline std::string system_exec(const char* cmd);
